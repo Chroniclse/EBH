@@ -4,8 +4,10 @@ import numpy as np
 import time
 
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
+face_mesh = mp_face_mesh.FaceMesh(
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
 mp_drawing = mp.solutions.drawing_utils
 drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
@@ -19,6 +21,7 @@ while cap.isOpened():
 
     start = time.time()
 
+    # Flip + convert
     image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
     image.flags.writeable = False
     results = face_mesh.process(image)
@@ -30,70 +33,98 @@ while cap.isOpened():
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
 
-            face_2d = []
-            face_3d = []
+            lm = face_landmarks.landmark
 
-            for idx, lm in enumerate(face_landmarks.landmark):
-                if idx in [33, 263, 1, 61, 291, 199]:
-                    x, y = int(lm.x * img_w), int(lm.y * img_h)
+            # -------- EYE-BASED LEFT/RIGHT DETECTION --------
+            left_eye_corner = (lm[33].x * img_w, lm[33].y * img_h)
+            right_eye_corner = (lm[263].x * img_w, lm[263].y * img_h)
 
-                    if idx == 1:
-                        nose_2d = (x, y)
-                        nose_3d = (x, y, lm.z * 3000)
+            eye_mid_x = (left_eye_corner[0] + right_eye_corner[0]) / 2
+            face_center_x = img_w / 2
 
-                    face_2d.append([x, y])
-                    face_3d.append([x, y, lm.z])
+            eye_offset = eye_mid_x - face_center_x
 
-            face_2d = np.array(face_2d, dtype=np.float64)
-            face_3d = np.array(face_3d, dtype=np.float64)
+            left_right_threshold = 40  # px threshold
+
+            # Convert eye_offset → yaw degrees (scaled)
+            max_yaw_angle = 35  # realistic head rotation
+            yaw_deg = (eye_offset / (img_w / 2)) * max_yaw_angle
+
+
+            # -------- 2D POINTS FOR PnP PITCH --------
+            image_points = np.array([
+                (lm[1].x   * img_w, lm[1].y   * img_h),   # Nose tip
+                (lm[199].x * img_w, lm[199].y * img_h),   # Chin
+                (lm[33].x  * img_w, lm[33].y  * img_h),   # Left eye
+                (lm[263].x * img_w, lm[263].y * img_h),   # Right eye
+                (lm[61].x  * img_w, lm[61].y  * img_h),   # Left mouth
+                (lm[291].x * img_w, lm[291].y * img_h),   # Right mouth
+            ], dtype=np.float64)
+
+            object_points = np.array([
+                (0.0, 0.0, 0.0),
+                (0.0, -330.0, -65.0),
+                (-225.0, 170.0, -135.0),
+                (225.0, 170.0, -135.0),
+                (-150.0, -150.0, -125.0),
+                (150.0, -150.0, -125.0)
+            ], dtype=np.float64)
 
             focal_length = img_w
             cam_matrix = np.array([
                 [focal_length, 0, img_w / 2],
                 [0, focal_length, img_h / 2],
                 [0, 0, 1]
-            ])
+            ], dtype=np.float64)
 
             dist_matrix = np.zeros((4, 1), dtype=np.float64)
 
-            success, rot_vec, trans_vec = cv2.solvePnP(face_3d, face_2d,
-                                                       cam_matrix, dist_matrix)
+            success, rot_vec, trans_vec = cv2.solvePnP(
+                object_points,
+                image_points,
+                cam_matrix,
+                dist_matrix,
+                flags=cv2.SOLVEPNP_ITERATIVE
+            )
 
-            rmat, jac = cv2.Rodrigues(rot_vec)
+            rmat, _ = cv2.Rodrigues(rot_vec)
             angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
 
-            x_ang, y_ang, z_ang = angles * 360
+            pitch_deg = angles[0] * 180  # degrees
 
-            if y_ang < -10:
-                text = "left"
-            elif y_ang > 10:
-                text = "right"
-            elif x_ang < -10:
-                text = "up"
-            elif x_ang > 10:
-                text = "down"
+
+            # -------- HEAD MOVEMENT LOGIC --------
+            
+            if pitch_deg > 15:
+                text = "Forward"
+            if eye_offset < -left_right_threshold:
+                text = "Left"
+            elif eye_offset > left_right_threshold:
+                text = "Right"
+            elif pitch_deg < -25:
+                text = "Brake"
             else:
-                text = "forward"
+                text = "Forward"
 
-            p1 = (int(nose_2d[0]), int(nose_2d[1]))
-            p2 = (int(nose_2d[0] + y_ang * 10),
-                  int(nose_2d[1] - x_ang * 10))
+            # ---------- DISPLAY ANGLES ----------
+            cv2.putText(image, f"Yaw: {yaw_deg:.1f}°", (20, 140),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 200, 255), 2)
 
-            cv2.line(image, p1, p2, (255, 0, 0), 3)
+            cv2.putText(image, f"Pitch: {pitch_deg:.1f}°", (20, 180),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0), 2)
 
-            cv2.putText(image, text, (20, 50),
+            cv2.putText(image, text, (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
 
-            end = time.time()
-            fps = 1 / (end - start)
-
+            # FPS
+            fps = 1 / (time.time() - start)
             cv2.putText(image, f'FPS: {int(fps)}', (20, 450),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
 
             mp_drawing.draw_landmarks(
                 image=image,
                 landmark_list=face_landmarks,
-                connections=mp_face_mesh.FACE_CONNECTIONS,
+                connections=mp_face_mesh.FACEMESH_CONTOURS,
                 landmark_drawing_spec=drawing_spec,
                 connection_drawing_spec=drawing_spec
             )
