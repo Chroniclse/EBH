@@ -3,14 +3,15 @@ import mediapipe as mp
 import numpy as np
 import serial
 import time
+from pynput.keyboard import Controller, Key
 
-arduino_port = "COM5"  
+arduino_port = "COM5"  # Replace 
 baudrate = 115200
 try:
     arduino = serial.Serial(arduino_port, baudrate, timeout=1)
     time.sleep(2)  
 except:
-    print("Not connected")
+    print("Arduino not connected. Haptics will be disabled.")
     arduino = None
 
 mp_face_mesh = mp.solutions.face_mesh
@@ -23,10 +24,7 @@ mp_drawing = mp.solutions.drawing_utils
 drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
 
 cap = cv2.VideoCapture(0)
-
-def normalize(val, min_val, max_val):
-    val = max(min_val, min(max_val, val))  # clamp
-    return (val - min_val) / (max_val - min_val)
+keyboard = Controller()
 
 def send_haptic(command):
     if arduino:
@@ -35,11 +33,10 @@ def send_haptic(command):
         except:
             pass
 
-yaw_min, yaw_max = -10, 10      
-pitch_min, pitch_max = -20, 20  
-brake_threshold = -10            
-offtrack_yaw_limit = 40          
-offtrack_pitch_limit = 30        
+yaw_threshold = 10        
+pitch_threshold = 10      
+offtrack_yaw_limit = 40   
+offtrack_pitch_limit = 30 
 
 while cap.isOpened():
     success, image = cap.read()
@@ -55,9 +52,9 @@ while cap.isOpened():
     image.flags.writeable = True
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    steering = 0
-    throttle = 0
-    brake = 0
+    steering_key = None
+    throttle_key = None
+    brake_key = None
     off_track = False
 
     if results.multi_face_landmarks:
@@ -92,33 +89,36 @@ while cap.isOpened():
             angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
             x_ang, y_ang, z_ang = angles * 360
 
-   
-            steering = 2 * normalize(y_ang, yaw_min, yaw_max) - 1   
-            throttle = 1 - normalize(x_ang, pitch_min, pitch_max)  
-            brake = 0
-            if x_ang < brake_threshold:
-                brake = normalize(-x_ang, 10, 20)  
+            if y_ang < -yaw_threshold:
+                steering_key = Key.left
+            elif y_ang > yaw_threshold:
+                steering_key = Key.right
+            else:
+                steering_key = None
+
+            if x_ang < -pitch_threshold:
+                throttle_key = Key.up
+                brake_key = None
+            elif x_ang > pitch_threshold:
+                throttle_key = None
+                brake_key = Key.down
+            else:
+                throttle_key = None
+                brake_key = None
 
             if abs(y_ang) > offtrack_yaw_limit or abs(x_ang) > offtrack_pitch_limit:
                 off_track = True
 
-
-            if off_track:
-                send_haptic("OFF_TRACK")
-            else:
-                send_haptic("ON_TRACK")
-
+            send_haptic("OFF_TRACK" if off_track else "ON_TRACK")
+            
             p1 = (int(nose_2d[0]), int(nose_2d[1]))
             p2 = (int(nose_2d[0] + y_ang * 10),
                   int(nose_2d[1] - x_ang * 10))
             cv2.line(image, p1, p2, (255, 0, 0), 3)
-            cv2.putText(image, f"Steer: {steering:.2f}", (20, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(image, f"Throttle: {throttle:.2f} Brake: {brake:.2f}", (20, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(image, f"Off-track: {off_track}", (20, 150),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255) if off_track else (0, 255, 0), 2)
-
+            cv2.putText(image, f"Yaw: {y_ang:.1f} Pitch: {x_ang:.1f}", (20,50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+            cv2.putText(image, f"Off-track: {off_track}", (20,100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if off_track else (0,255,0), 2)
             mp_drawing.draw_landmarks(
                 image=image,
                 landmark_list=face_landmarks,
@@ -127,15 +127,35 @@ while cap.isOpened():
                 connection_drawing_spec=drawing_spec
             )
 
+
+    if steering_key == Key.left:
+        keyboard.press(Key.left)
+        keyboard.release(Key.right)
+    elif steering_key == Key.right:
+        keyboard.press(Key.right)
+        keyboard.release(Key.left)
+    else:
+        keyboard.release(Key.left)
+        keyboard.release(Key.right)
+        
+    if throttle_key == Key.up:
+        keyboard.press(Key.up)
+        keyboard.release(Key.down)
+    elif brake_key == Key.down:
+        keyboard.press(Key.down)
+        keyboard.release(Key.up)
+    else:
+        keyboard.release(Key.up)
+        keyboard.release(Key.down)
+
     end = time.time()
     fps = 1 / (end - start)
     cv2.putText(image, f'FPS: {int(fps)}', (20, 450),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
 
-
     cv2.imshow("Head Pose Racing Controls", image)
 
-    if cv2.waitKey(5) & 0xFF == 27:
+    if cv2.waitKey(5) & 0xFF == 27: 
         break
 
 cap.release()
